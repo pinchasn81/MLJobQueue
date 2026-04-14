@@ -115,17 +115,24 @@ def assign_tasks(
     assignments = task_queue.assign_tasks()
     db.commit()  # commit RUNNING status before pushing to Redis
 
-    for task_id, _, priority in assignments:
-        target_queue = queues[Priority(value=priority)]
-        # job_timeout=-1 disables SIGALRM-based timeout (main-thread-only signal).
-        target_queue.enqueue(f=process_task, args=(task_id,), job_timeout=-1)
+    if assignments:
+        # Batch fetch priorities — one query for all assigned tasks instead of N
+        assigned_ids = [task_id for task_id, _ in assignments]
+        priority_map = {
+            t.task_id: t.priority
+            for t in db.query(TaskModel).filter(TaskModel.task_id.in_(assigned_ids)).all()
+        }
+        for task_id, _ in assignments:
+            target_queue = queues[Priority(value=priority_map[task_id])]
+            # job_timeout=-1 disables SIGALRM-based timeout (main-thread-only signal).
+            target_queue.enqueue(f=process_task, args=(task_id,), job_timeout=-1)
 
     logger.info("Assigned %d task(s) to workers", len(assignments))
     return {
         "assigned_count": len(assignments),
         "assignments": [
             {"task_id": task_id, "worker_id": worker_id}
-            for task_id, worker_id, _ in assignments
+            for task_id, worker_id in assignments
         ],
     }
 

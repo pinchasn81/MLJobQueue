@@ -128,7 +128,7 @@ class TaskQueue:
             max_retries,
         )
 
-    def assign_tasks(self) -> List[Tuple[str, int, int]]:
+    def assign_tasks(self) -> List[Tuple[str, int]]:
         """
         Assign pending tasks to idle workers, respecting priority then FIFO order.
 
@@ -167,14 +167,14 @@ class TaskQueue:
             logger.debug("No pending tasks to assign")
             return []
 
-        assignments: List[Tuple[str, int, int]] = []
+        assignments: List[Tuple[str, int]] = []
 
         for task, worker in zip(pending_tasks, idle_workers):
             task.status = int(TaskStatus.RUNNING)
             task.worker_id = worker.worker_id
             worker.status = int(WorkerStatus.BUSY)
 
-            assignments.append((task.task_id, worker.worker_id, task.priority))
+            assignments.append((task.task_id, worker.worker_id))
             logger.info(
                 "Task assigned | task_id=%s worker_id=%d", task.task_id, worker.worker_id
             )
