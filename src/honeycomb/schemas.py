@@ -21,6 +21,21 @@ class SubmitTaskRequest(BaseModel):
     model_config = {"use_enum_values": True}
 
 
+class SubmitTaskResponse(BaseModel):
+    task_id: str
+    status: str = Field(description="Initial status of the submitted task (always 'pending')")
+
+
+class AssignmentItem(BaseModel):
+    task_id: str
+    worker_id: int
+
+
+class AssignTasksResponse(BaseModel):
+    assigned_count: int
+    assignments: list[AssignmentItem]
+
+
 class TaskStatusResponse(BaseModel):
     task_id: str
     status: TaskStatus

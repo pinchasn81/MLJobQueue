@@ -179,7 +179,7 @@ class TaskQueue:
                 "Task assigned | task_id=%s worker_id=%d", task.task_id, worker.worker_id
             )
 
-        self._session.flush()
+        self._session.commit()
         return assignments
 
     def complete_task(self, task_id: str, success: bool) -> None:

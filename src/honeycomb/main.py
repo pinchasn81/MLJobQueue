@@ -22,7 +22,14 @@ from sqlalchemy.orm import Session
 from honeycomb.database import NUM_WORKERS, get_db, init_db, redis_conn
 from honeycomb.logging_config import setup_logging
 from honeycomb.models import TaskModel
-from honeycomb.schemas import QueueStats, SubmitTaskRequest, TaskStatusResponse
+from honeycomb.schemas import (
+    AssignTasksResponse,
+    AssignmentItem,
+    QueueStats,
+    SubmitTaskRequest,
+    SubmitTaskResponse,
+    TaskStatusResponse,
+)
 from honeycomb.task_queue import Priority, TaskQueue, TaskStatus
 from honeycomb.worker import process_task, start_workers
 
@@ -73,11 +80,9 @@ def submit_task(
     request: SubmitTaskRequest,
     task_queue: TaskQueue = Depends(get_task_queue),
     db: Session = Depends(get_db),
-) -> dict:
+) -> SubmitTaskResponse:
     """
-    Submit a job to the queue. Writes PENDING to SQLite, then enqueues to Redis
-    so a worker picks it up automatically — no manual assign call needed.
-
+    Submit a job to the queue. Writes PENDING to SQLite
     We commit to SQLite before enqueueing to Redis so the worker always finds the
     task in the DB. Without this, a fast worker could pick up the job before the
     HTTP session's end-of-request commit, resulting in a "task not found" error.
@@ -93,14 +98,14 @@ def submit_task(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Task '{request.task_id}' already exists.",
         )
-    return {"task_id": request.task_id, "status": TaskStatus.PENDING.name.lower()}
+    return SubmitTaskResponse(task_id=request.task_id, status=TaskStatus.PENDING.name.lower())
 
 
 @app.post("/assign", summary="Assign pending tasks to idle workers")
 def assign_tasks(
     task_queue: TaskQueue = Depends(get_task_queue),
     db: Session = Depends(get_db),
-) -> dict:
+) -> AssignTasksResponse:
     """
     Assign pending (and retrying) tasks to idle workers in priority order.
 
@@ -113,7 +118,6 @@ def assign_tasks(
     Call this endpoint whenever you want to drain the pending queue.
     """
     assignments = task_queue.assign_tasks()
-    db.commit()  # commit RUNNING status before pushing to Redis
 
     if assignments:
         # Batch fetch priorities — one query for all assigned tasks instead of N
@@ -128,13 +132,10 @@ def assign_tasks(
             target_queue.enqueue(f=process_task, args=(task_id,), job_timeout=-1)
 
     logger.info("Assigned %d task(s) to workers", len(assignments))
-    return {
-        "assigned_count": len(assignments),
-        "assignments": [
-            {"task_id": task_id, "worker_id": worker_id}
-            for task_id, worker_id in assignments
-        ],
-    }
+    return AssignTasksResponse(
+        assigned_count=len(assignments),
+        assignments=[AssignmentItem(task_id=task_id, worker_id=worker_id) for task_id, worker_id in assignments],
+    )
 
 
 @app.get("/tasks/{task_id}", summary="Query task status")
