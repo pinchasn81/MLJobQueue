@@ -6,7 +6,7 @@ database schema look similar now but evolve independently — API fields may be 
 versioned, or filtered without touching the DB schema.
 """
 
-from typing import Optional
+from typing import Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -54,3 +54,4 @@ class QueueStats(BaseModel):
     completion_rate: float = Field(description="Success rate among finished tasks (0–1)")
     avg_retries: float = Field(description="Average retries per submitted task")
     worker_utilization: float = Field(description="Proportion of workers currently busy (0–1)")
+    workers: Dict[str, str] = Field(description="Status of each worker in the pool (IDLE or task_id)")

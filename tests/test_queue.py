@@ -147,6 +147,32 @@ class TestQueueAPI:
         assert_that(stats["total_completed"]).is_equal_to(4.0)
         assert_that(stats["total_failed"]).is_equal_to(0.0)
         assert_that(stats["completion_rate"]).is_equal_to(1.0)
+        
+        # Verify all workers back to IDLE
+        for worker_id, status in stats["workers"].items():
+            assert_that(status).is_equal_to("IDLE")
+
+    def test_worker_status_while_running(self, server_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stats reflect busy workers while tasks are executing."""
+        # Use a long duration to ensure we catch them running
+        mock_rates(monkeypatch=monkeypatch, failure=0.0, duration=(1.0, 2.0))
+        client = httpx.Client(base_url=server_url, timeout=10)
+
+        task_id = "busy_task"
+        submit_tasks(client=client, tasks=[{"task_id": task_id, "priority": Priority.NORMAL.value, "max_retries": 0}])
+        client.post("/assign")
+
+        # Give it a tiny bit of time to start
+        time.sleep(0.1)
+
+        stats = client.get("/stats").json()
+        # At least one worker should be busy with our task
+        busy_workers = [v for v in stats["workers"].values() if v == task_id]
+        assert_that(busy_workers).is_length(1)
+        
+        # Other workers should be IDLE (default is 4 workers)
+        idle_workers = [v for v in stats["workers"].values() if v == "IDLE"]
+        assert_that(idle_workers).is_length(3)
 
     def test_load_high_throughput(self, server_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
         """100 tasks complete within 60 s; stats show full completion and low avg retries."""

@@ -270,6 +270,19 @@ class TaskQueue:
         completion_rate = completed / finished if finished > 0 else 0.0
         worker_utilization = running / self._num_workers if self._num_workers > 0 else 0.0
 
+        # Reconstruct detailed worker pool status
+        busy_workers = {
+            task.worker_id: task.task_id
+            for task in self._session.query(TaskModel)
+            .filter(TaskModel.status == int(TaskStatus.RUNNING))
+            .all()
+        }
+        
+        workers = {
+            f"worker_{i}": busy_workers.get(i, "IDLE")
+            for i in range(self._num_workers)
+        }
+
         return {
             "total_submitted": float(total_submitted),
             "total_completed": float(completed),
@@ -277,6 +290,7 @@ class TaskQueue:
             "completion_rate": completion_rate,
             "avg_retries": avg_retries,
             "worker_utilization": worker_utilization,
+            "workers": workers,
         }
 
     def num_pending(self) -> int:
