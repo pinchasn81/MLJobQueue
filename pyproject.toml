@@ -1,0 +1,46 @@
+[project]
+name = "honeycomb"
+version = "0.1.0"
+description = "ML training job queue system with priority scheduling, retry logic, and worker management"
+authors = [
+    { name = "NirAutomation", email = "nirp@at-bay.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    # FastAPI: modern, high-performance web framework with automatic OpenAPI docs and Pydantic integration
+    "fastapi>=0.115",
+    # uvicorn: ASGI server — lightweight, production-ready, supports hot-reload for dev
+    "uvicorn[standard]>=0.34",
+    # SQLAlchemy 2.0: ORM with type-safe mapped_column API — transactions, FK constraints, session mgmt
+    "sqlalchemy>=2.0",
+    # pydantic: request/response schema validation — separate from ORM models for clean API boundaries
+    "pydantic>=2.0",
+    # backoff: decorator-based retry for transient failures (used for DB resilience, NOT task retry)
+    # Task retry is stateful domain logic; backoff is for function-call-level infrastructure failures
+    "backoff>=2.2",
+    "rq>=2.7.0",
+    "fakeredis>=2.35.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    # pytest: test runner — added here so it's a dev-only dep, not bundled in production
+    "pytest>=8.0",
+    # httpx: async-capable HTTP client required by FastAPI's TestClient
+    "httpx>=0.28",
+    # assertpy: fluent assertions
+    "assertpy>=1.1",
+]
+
+# Application config lives here — centralized, no env var sprawl for simple settings.
+# tomllib (stdlib in Python 3.11+) reads this at startup.
+[tool.honeycomb]
+num_workers = 4       # size of the compute worker pool
+db_path = "honeycomb.db"  # SQLite file path; use ":memory:" in tests
+
+[project.scripts]
+honeycomb = "honeycomb.main:start"
+
+[build-system]
+requires = ["uv_build>=0.11.3,<0.12.0"]
+build-backend = "uv_build"
