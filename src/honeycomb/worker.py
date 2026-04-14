@@ -59,8 +59,7 @@ class _ThreadedWorker(SimpleWorker):
         pass
 
 from honeycomb.database import NUM_WORKERS, SessionLocal, redis_conn
-from honeycomb.models import TaskModel, WorkerModel
-from honeycomb.task_queue import Priority, TaskQueue, TaskStatus, WorkerStatus
+from honeycomb.task_queue import TaskQueue
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +82,6 @@ def process_task(task_id: str) -> None:
     to Redis. This function only handles the outcome.
     """
     worker_id: int = _local.worker_id
-
-    # Verify the task exists before doing any work
-    with SessionLocal() as session:
-        task = session.get(entity=TaskModel, ident=task_id)
-        if task is None:
-            logger.error("process_task: task not found | task_id=%s", task_id)
-            return
 
     # ── Simulate work (outside the DB session to avoid holding a connection) ──
     duration = random.uniform(*WORK_DURATION)

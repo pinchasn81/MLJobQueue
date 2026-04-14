@@ -43,8 +43,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Starting Honeycomb ML Job Queue server")
     init_db(num_workers=NUM_WORKERS)
     
-    # Start workers listening to all queues in priority order
-    priority_queues = [queues[Priority.HIGH], queues[Priority.NORMAL], queues[Priority.LOW]]
+    # Start workers listening to all queues in priority order (highest value first)
+    priority_queues = [queues[p] for p in sorted(queues, reverse=True)]
     start_workers(priority_queues=priority_queues)
     
     logger.info("Server ready — %d workers listening on priority queues (%s)", NUM_WORKERS, ", ".join(q.name for q in priority_queues))
@@ -115,9 +115,8 @@ def assign_tasks(
     assignments = task_queue.assign_tasks()
     db.commit()  # commit RUNNING status before pushing to Redis
 
-    for task_id, _ in assignments:
-        task = db.get(TaskModel, task_id)
-        target_queue = queues[Priority(value=task.priority)]
+    for task_id, _, priority in assignments:
+        target_queue = queues[Priority(value=priority)]
         # job_timeout=-1 disables SIGALRM-based timeout (main-thread-only signal).
         target_queue.enqueue(f=process_task, args=(task_id,), job_timeout=-1)
 
@@ -126,20 +125,18 @@ def assign_tasks(
         "assigned_count": len(assignments),
         "assignments": [
             {"task_id": task_id, "worker_id": worker_id}
-            for task_id, worker_id in assignments
+            for task_id, worker_id, _ in assignments
         ],
     }
 
 
 @app.get("/tasks/{task_id}", summary="Query task status")
-def get_task_status(task_id: str, task_queue: TaskQueue = Depends(get_task_queue)) -> TaskStatusResponse:
+def get_task_status(task_id: str, db: Session = Depends(get_db)) -> TaskStatusResponse:
     """Return the current status, priority, and retry count for a task."""
-    try:
-        task_status = task_queue.get_task_status(task_id=task_id)
-    except KeyError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-
-    task = task_queue._session.get(entity=TaskModel, ident=task_id)
+    task = db.get(TaskModel, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task '{task_id}' not found")
+    task_status = TaskStatus(task.status)
     return TaskStatusResponse(
         task_id=task_id,
         status=task_status,

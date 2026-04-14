@@ -14,7 +14,7 @@ import logging
 from enum import IntEnum
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from honeycomb.models import TaskModel, WorkerModel
@@ -78,21 +78,19 @@ class TaskQueue:
         """
         self._num_workers = num_workers
         self._session = session
-
         # Monotonic counter for strict FIFO ordering within a priority tier.
-        # Initialized from DB max to survive restarts correctly.
-        self._submission_counter: int = self._init_submission_counter()
+        # None = not yet seeded; seeded lazily on first call to _next_order().
+        self._submission_counter: Optional[int] = None
 
         logger.debug("TaskQueue initialized with %d workers", num_workers)
 
-    def _init_submission_counter(self) -> int:
-        """Seed the counter from existing DB rows so restarts don't reset FIFO order."""
-        if self._session is None:
-            return 0
-        result = self._session.query(func.max(TaskModel.submission_order)).scalar()
-        return (result or 0) + 1
-
     def _next_order(self) -> int:
+        if self._submission_counter is None:
+            if self._session is None:
+                self._submission_counter = 0
+            else:
+                result = self._session.query(func.max(TaskModel.submission_order)).scalar()
+                self._submission_counter = (result or 0) + 1
         counter = self._submission_counter
         self._submission_counter += 1
         return counter
@@ -130,7 +128,7 @@ class TaskQueue:
             max_retries,
         )
 
-    def assign_tasks(self) -> List[Tuple[str, int]]:
+    def assign_tasks(self) -> List[Tuple[str, int, int]]:
         """
         Assign pending tasks to idle workers, respecting priority then FIFO order.
 
@@ -169,14 +167,14 @@ class TaskQueue:
             logger.debug("No pending tasks to assign")
             return []
 
-        assignments: List[Tuple[str, int]] = []
+        assignments: List[Tuple[str, int, int]] = []
 
         for task, worker in zip(pending_tasks, idle_workers):
             task.status = int(TaskStatus.RUNNING)
             task.worker_id = worker.worker_id
             worker.status = int(WorkerStatus.BUSY)
 
-            assignments.append((task.task_id, worker.worker_id))
+            assignments.append((task.task_id, worker.worker_id, task.priority))
             logger.info(
                 "Task assigned | task_id=%s worker_id=%d", task.task_id, worker.worker_id
             )
@@ -222,8 +220,6 @@ class TaskQueue:
 
         else:
             task.retry_count += 1
-            backoff_seconds = 2 ** task.retry_count  # exponential: 2, 4, 8, 16 ...
-
             if task.retry_count <= task.max_retries:
                 # Re-enqueue at the back of its priority tier
                 # New submission_order places it after all currently-pending tasks
@@ -234,7 +230,7 @@ class TaskQueue:
                     task_id,
                     task.retry_count,
                     task.max_retries,
-                    backoff_seconds,
+                    2 ** task.retry_count,
                 )
             else:
                 task.status = int(TaskStatus.FAILED)
@@ -274,35 +270,25 @@ class TaskQueue:
             Dict with: total_submitted, total_completed, total_failed,
                        completion_rate, avg_retries, worker_utilization
         """
-        total_submitted = self._session.query(func.count(TaskModel.task_id)).scalar() or 0
+        # Single query for all task metrics via conditional aggregation
+        task_row = self._session.query(
+            func.count(TaskModel.task_id).label("total"),
+            func.sum(case((TaskModel.status == int(TaskStatus.COMPLETED), 1), else_=0)).label("completed"),
+            func.sum(case((TaskModel.status == int(TaskStatus.FAILED), 1), else_=0)).label("failed"),
+            func.avg(TaskModel.retry_count).label("avg_retries"),
+        ).one()
+        total_submitted = task_row.total or 0
+        completed = task_row.completed or 0
+        failed = task_row.failed or 0
+        avg_retries = float(task_row.avg_retries or 0.0)
 
-        completed = (
-            self._session.query(func.count(TaskModel.task_id))
-            .filter(TaskModel.status == int(TaskStatus.COMPLETED))
-            .scalar()
-            or 0
-        )
-
-        failed = (
-            self._session.query(func.count(TaskModel.task_id))
-            .filter(TaskModel.status == int(TaskStatus.FAILED))
-            .scalar()
-            or 0
-        )
-
-        # Average retries across all submitted tasks (not just finished ones)
-        avg_retries = (
-            self._session.query(func.avg(TaskModel.retry_count)).scalar() or 0.0
-        )
-
-        # Worker utilization: proportion of workers currently BUSY
-        total_workers = self._session.query(func.count(WorkerModel.worker_id)).scalar() or 0
-        busy_workers = (
-            self._session.query(func.count(WorkerModel.worker_id))
-            .filter(WorkerModel.status == int(WorkerStatus.BUSY))
-            .scalar()
-            or 0
-        )
+        # Single query for worker metrics
+        worker_row = self._session.query(
+            func.count(WorkerModel.worker_id).label("total"),
+            func.sum(case((WorkerModel.status == int(WorkerStatus.BUSY), 1), else_=0)).label("busy"),
+        ).one()
+        total_workers = worker_row.total or 0
+        busy_workers = worker_row.busy or 0
 
         finished = completed + failed
         # Guard against division by zero when no tasks have finished yet
