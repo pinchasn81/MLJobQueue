@@ -16,3 +16,6 @@ INTERVIEW_PREP.md
 *.db
 *.db-shm
 *.db-wal
+
+# Model/Agent instructions
+CLAUDE.md
