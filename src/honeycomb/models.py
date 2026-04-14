@@ -10,31 +10,12 @@ as documentation. Anyone reading this file understands the full DB contract.
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import DateTime, Index, Integer, String, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
     pass
-
-
-class WorkerModel(Base):
-    """
-    One row per worker in the compute pool. Workers are seeded at startup.
-
-    Design choice: store workers in the DB (not just an in-memory list) so that
-    task.worker_id can carry a FK constraint. This prevents assigning tasks to
-    nonexistent workers and enables future worker metadata (labels, capacity, etc.)
-    without schema changes elsewhere.
-    """
-
-    __tablename__ = "workers"
-
-    worker_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # WorkerStatus enum value — stored as int for compact storage and fast comparison
-    status: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-
-    tasks: Mapped[list["TaskModel"]] = relationship("TaskModel", back_populates="worker")
 
 
 class TaskModel(Base):
@@ -60,11 +41,8 @@ class TaskModel(Base):
 
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # FK to workers — None when task is not currently assigned.
-    # Referential integrity: can't assign a task to a worker that doesn't exist.
-    worker_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("workers.worker_id"), nullable=True
-    )
+    # Slot index (0..NUM_WORKERS-1) set while task is RUNNING, cleared on completion.
+    worker_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Monotonic counter for strict FIFO ordering within a priority tier.
     # Design choice: use a counter instead of created_at timestamp — timestamps can
@@ -78,10 +56,6 @@ class TaskModel(Base):
     )
     updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, onupdate=func.now(), nullable=True
-    )
-
-    worker: Mapped[Optional["WorkerModel"]] = relationship(
-        "WorkerModel", back_populates="tasks"
     )
 
     # Composite covering index for the hot assignment query:

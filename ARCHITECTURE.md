@@ -11,7 +11,7 @@ CI/CD Pipeline
      ▼
 ┌─────────────┐    SQLite (WAL)    ┌──────────────────────┐
 │  FastAPI    │ ◄────────────────► │  TaskModel           │
-│  Server     │                    │  WorkerModel         │
+│  Server     │                    │                      │
 └─────────────┘                    └──────────────────────┘
      │
      │  POST /assign (trigger)
@@ -25,9 +25,9 @@ CI/CD Pipeline
      │  blpop (blocking dequeue)
      ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Worker Threads (N daemon threads, 1 per worker_id)     │
+│  Worker Threads (N daemon threads, 1 per slot ID)      │
 │  Each runs _ThreadedWorker(SimpleWorker) in a loop      │
-│  process_task() → sleep → complete_task() → IDLE        │
+│  process_task() → sleep → complete_task()               │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -94,7 +94,7 @@ A single queue with a priority field would require the worker to sort the queue 
 
 ### Thread-local `worker_id` over passing it as a job argument
 
-RQ serializes job functions by import path and arguments. Passing `worker_id` as an argument would mean any worker thread could claim any worker_id, breaking the 1:1 mapping between DB workers and threads. Thread-local storage (`threading.local`) binds the worker_id to the thread at startup — `process_task()` reads it without any argument passing.
+RQ serializes job functions by import path and arguments. Passing `worker_id` (slot ID) as an argument would mean any worker thread could claim any ID, breaking the 1:1 mapping between tasks and IDs during execution. Thread-local storage (`threading.local`) binds the ID to the thread at startup — `process_task()` reads it without any argument passing.
 
 ### `backoff` at the DB session level only
 
@@ -127,14 +127,10 @@ tasks
 ├── max_retries      INTEGER
 ├── status           INTEGER  (0=PENDING, 1=RUNNING, 2=RETRYING, 3=COMPLETED, 4=FAILED)
 ├── retry_count      INTEGER
-├── worker_id        INTEGER FK → workers.worker_id (nullable)
+├── worker_id        INTEGER (Slot ID: 0..N-1, nullable)
 ├── submission_order INTEGER  (monotonic counter for FIFO)
 ├── created_at       DATETIME
 └── updated_at       DATETIME
-
-workers
-├── worker_id  INTEGER PRIMARY KEY
-└── status     INTEGER  (0=IDLE, 1=BUSY, 2=FAILED)
 
 Index: ix_tasks_assignment ON tasks(status, priority, submission_order)
 ```
@@ -169,7 +165,6 @@ Tests use a **session-scoped server fixture**: uvicorn starts once in a daemon t
 
 Each test uses the `clean_state` autouse fixture which:
 1. Deletes all tasks from SQLite
-2. Resets all workers to IDLE
-3. Deletes RQ queue keys from Redis
+2. Deletes RQ queue keys from Redis
 
 `monkeypatch.setattr` on `FAILURE_RATE` and `WORK_DURATION` works because worker threads are in the same process and read the same module-level variables.

@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from honeycomb.models import TaskModel, WorkerModel
+from honeycomb.models import TaskModel
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +46,6 @@ class TaskStatus(IntEnum):
     FAILED = 4
 
 
-class WorkerStatus(IntEnum):
-    """Worker availability states."""
-
-    IDLE = 0
-    BUSY = 1
-    FAILED = 2
-
-
 # ─── TaskQueue ─────────────────────────────────────────────────────────────────
 
 
@@ -62,8 +54,8 @@ class TaskQueue:
     Priority-based task queue for ML training jobs.
 
     Manages job lifecycle: submission → assignment → completion/retry/failure.
-    Workers are pre-seeded in the DB at startup; this class only manages their
-    IDLE/BUSY status transitions.
+    Worker capacity is tracked as a slot count (0..num_workers-1) derived from
+    the number of currently RUNNING tasks — no separate worker table needed.
     """
 
     def __init__(self, num_workers: int, session: Optional[Session] = None) -> None:
@@ -71,8 +63,8 @@ class TaskQueue:
         Initialize the task queue with a worker pool.
 
         Args:
-            num_workers: Number of workers in the compute pool. Used only when
-                         operating without a pre-seeded DB (e.g., standalone mode).
+            num_workers: Size of the compute worker pool (bounds how many tasks
+                         assign_tasks() will start at once).
             session: Optional SQLAlchemy session for dependency injection (FastAPI).
                      If None, the queue operates in standalone mode (caller manages sessions).
         """
@@ -120,7 +112,7 @@ class TaskQueue:
             submission_order=self._next_order(),
         )
         self._session.add(task)
-        self._session.commit()  # write to DB within current transaction
+        self._session.commit()  # write to DB before pushing to Redis (worker must find the row)
         logger.info(
             "Task submitted | task_id=%s priority=%s max_retries=%d",
             task_id,
@@ -128,30 +120,32 @@ class TaskQueue:
             max_retries,
         )
 
-    def assign_tasks(self) -> List[Tuple[str, int]]:
+    def assign_tasks(self) -> List[Tuple[str, int, int]]:
         """
-        Assign pending tasks to idle workers, respecting priority then FIFO order.
+        Assign pending tasks to idle worker slots, respecting priority then FIFO order.
 
-        Design choice: single sorted query + bulk update in one transaction.
-        The composite index on (status, priority, submission_order) makes this
-        O(log n) instead of a full table scan. All assignments are committed atomically
-        — no partial state where some workers show busy but their tasks aren't recorded.
+        Worker capacity is derived from currently RUNNING tasks: available slots =
+        num_workers - running_count. Free slot IDs are the integers 0..num_workers-1
+        not already held by a RUNNING task.
 
         Returns:
-            List of (task_id, worker_id) assignments made in this call.
+            List of (task_id, worker_id, priority) assignments made in this call.
         """
-        # Fetch idle workers — small result set, no index needed
-        idle_workers = (
-            self._session.query(WorkerModel)
-            .filter(WorkerModel.status == int(WorkerStatus.IDLE))
+        # Find which slot IDs (0..num_workers-1) are already in use
+        used_slots = {
+            row[0]
+            for row in self._session.query(TaskModel.worker_id)
+            .filter(
+                TaskModel.status == int(TaskStatus.RUNNING),
+                TaskModel.worker_id.isnot(None),
+            )
             .all()
-        )
-        if not idle_workers:
+        }
+        free_slots = [i for i in range(self._num_workers) if i not in used_slots]
+        if not free_slots:
             logger.debug("No idle workers available for assignment")
             return []
 
-        # Fetch pending/retrying tasks ordered by priority DESC then FIFO
-        # Limit to available idle workers — no point fetching more than we can assign
         pending_tasks = (
             self._session.query(TaskModel)
             .filter(
@@ -160,43 +154,38 @@ class TaskQueue:
                 )
             )
             .order_by(TaskModel.priority.desc(), TaskModel.submission_order.asc())
-            .limit(len(idle_workers))
+            .limit(len(free_slots))
             .all()
         )
         if not pending_tasks:
             logger.debug("No pending tasks to assign")
             return []
 
-        assignments: List[Tuple[str, int]] = []
+        assignments: List[Tuple[str, int, int]] = []
 
-        for task, worker in zip(pending_tasks, idle_workers):
+        for task, slot_id in zip(pending_tasks, free_slots):
             task.status = int(TaskStatus.RUNNING)
-            task.worker_id = worker.worker_id
-            worker.status = int(WorkerStatus.BUSY)
+            task.worker_id = slot_id
 
-            assignments.append((task.task_id, worker.worker_id))
+            assignments.append((task.task_id, slot_id, task.priority))
             logger.info(
-                "Task assigned | task_id=%s worker_id=%d", task.task_id, worker.worker_id
+                "Task assigned | task_id=%s worker_id=%d", task.task_id, slot_id
             )
 
-        self._session.commit()
+        self._session.flush()
         return assignments
 
     def complete_task(self, task_id: str, success: bool) -> None:
         """
         Mark a running task as completed or failed.
 
-        On success: status → COMPLETED, worker freed.
+        On success: status → COMPLETED, slot freed.
         On failure with retries remaining: status → RETRYING, re-queued at back of
-            its priority tier (new submission_order), worker freed.
-        On failure with no retries: status → FAILED, worker freed.
-
-        Design choice: the entire state transition (task update + worker free) happens
-        in one flush — callers see either the full transition or none of it.
+            its priority tier (new submission_order), slot freed.
+        On failure with no retries: status → FAILED, slot freed.
 
         Backoff calculation: 2^retry_count seconds. We track the value but don't sleep
-        — in a real system this would be a scheduled delay. Here it's observable via
-        the task record for monitoring purposes.
+        — in a real system this would be a scheduled delay.
 
         Args:
             task_id: ID of the task that finished
@@ -207,12 +196,7 @@ class TaskQueue:
             logger.error("complete_task called for unknown task_id=%s", task_id)
             return
 
-        # Free the worker regardless of outcome
-        if task.worker_id is not None:
-            worker = self._session.get(entity=WorkerModel, ident=task.worker_id)
-            if worker:
-                worker.status = int(WorkerStatus.IDLE)
-            task.worker_id = None
+        task.worker_id = None  # free the slot regardless of outcome
 
         if success:
             task.status = int(TaskStatus.COMPLETED)
@@ -221,8 +205,6 @@ class TaskQueue:
         else:
             task.retry_count += 1
             if task.retry_count <= task.max_retries:
-                # Re-enqueue at the back of its priority tier
-                # New submission_order places it after all currently-pending tasks
                 task.status = int(TaskStatus.RETRYING)
                 task.submission_order = self._next_order()
                 logger.warning(
@@ -237,7 +219,7 @@ class TaskQueue:
                 logger.error(
                     "Task permanently failed | task_id=%s total_retries=%d",
                     task_id,
-                    task.retry_count - 1,  # subtract the final failed attempt
+                    task.retry_count - 1,
                 )
 
         self._session.flush()
@@ -262,45 +244,38 @@ class TaskQueue:
         """
         Get queue performance statistics via SQL aggregations.
 
-        Design choice: delegate aggregation to the DB engine rather than fetching all
-        rows and computing in Python. COUNT/AVG on an indexed column is O(log n) in
-        SQLite; pulling all rows would be O(n) in memory.
+        Design choice: single query with conditional aggregation instead of one query
+        per metric. COUNT/SUM(CASE ...) lets SQLite compute all counters in one pass.
+        Worker utilization = running_tasks / num_workers (no separate worker table needed).
 
         Returns:
             Dict with: total_submitted, total_completed, total_failed,
                        completion_rate, avg_retries, worker_utilization
         """
-        # Single query for all task metrics via conditional aggregation
-        task_row = self._session.query(
+        row = self._session.query(
             func.count(TaskModel.task_id).label("total"),
             func.sum(case((TaskModel.status == int(TaskStatus.COMPLETED), 1), else_=0)).label("completed"),
             func.sum(case((TaskModel.status == int(TaskStatus.FAILED), 1), else_=0)).label("failed"),
+            func.sum(case((TaskModel.status == int(TaskStatus.RUNNING), 1), else_=0)).label("running"),
             func.avg(TaskModel.retry_count).label("avg_retries"),
         ).one()
-        total_submitted = task_row.total or 0
-        completed = task_row.completed or 0
-        failed = task_row.failed or 0
-        avg_retries = float(task_row.avg_retries or 0.0)
 
-        # Single query for worker metrics
-        worker_row = self._session.query(
-            func.count(WorkerModel.worker_id).label("total"),
-            func.sum(case((WorkerModel.status == int(WorkerStatus.BUSY), 1), else_=0)).label("busy"),
-        ).one()
-        total_workers = worker_row.total or 0
-        busy_workers = worker_row.busy or 0
+        total_submitted = row.total or 0
+        completed = row.completed or 0
+        failed = row.failed or 0
+        running = row.running or 0
+        avg_retries = float(row.avg_retries or 0.0)
 
         finished = completed + failed
-        # Guard against division by zero when no tasks have finished yet
         completion_rate = completed / finished if finished > 0 else 0.0
-        worker_utilization = busy_workers / total_workers if total_workers > 0 else 0.0
+        worker_utilization = running / self._num_workers if self._num_workers > 0 else 0.0
 
         return {
             "total_submitted": float(total_submitted),
             "total_completed": float(completed),
             "total_failed": float(failed),
             "completion_rate": completion_rate,
-            "avg_retries": float(avg_retries),
+            "avg_retries": avg_retries,
             "worker_utilization": worker_utilization,
         }
 

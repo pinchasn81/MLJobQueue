@@ -22,7 +22,7 @@ from sqlalchemy import create_engine, event, Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from honeycomb.models import Base, WorkerModel
+from honeycomb.models import Base
 
 logger = logging.getLogger(__name__)
 
@@ -90,25 +90,10 @@ redis_conn = FakeRedis(decode_responses=False)
 
 def init_db(num_workers: int = NUM_WORKERS) -> None:
     """
-    Create all tables and seed the worker pool.
-
-    Design choice: create_all() instead of Alembic. We have no migration history —
-    tables are created from scratch. Alembic adds versions/, env.py, and alembic.ini
-    for zero migrations. We'd add it the moment a schema change is needed in production.
+    Create all tables. Capacity is derived from TaskModel, so no seeding required.
     """
     logger.info("Initializing database schema")
     Base.metadata.create_all(bind=engine)
-
-    with SessionLocal() as session:
-        existing = session.query(WorkerModel).count()
-        if existing == 0:
-            workers = [WorkerModel(worker_id=i, status=0) for i in range(num_workers)]
-            session.add_all(workers)
-            session.commit()
-            logger.info("Seeded %d workers into the worker pool", num_workers)
-        else:
-            logger.info("Worker pool already initialized (%d workers)", existing)
-
 
 # ─── FastAPI dependency ────────────────────────────────────────────────────────
 

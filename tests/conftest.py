@@ -22,8 +22,7 @@ import uvicorn
 
 from honeycomb.database import SessionLocal, redis_conn
 from honeycomb.main import app, queues
-from honeycomb.models import TaskModel, WorkerModel
-from honeycomb.task_queue import WorkerStatus
+from honeycomb.models import TaskModel
 
 
 def _free_port() -> int:
@@ -73,7 +72,6 @@ def clean_state() -> None:
     """
     with SessionLocal() as session:
         session.query(TaskModel).delete()
-        session.query(WorkerModel).update({"status": int(WorkerStatus.IDLE)})
         session.commit()
 
     # Clear all RQ queue keys directly — q.empty() uses Lua EVALSHA which

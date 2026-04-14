@@ -114,7 +114,7 @@ src/honeycomb/
 ├── main.py           # FastAPI app, lifespan, route handlers
 ├── task_queue.py     # Core domain logic — TaskQueue class + enums
 ├── worker.py         # Background worker threads + RQ job function
-├── models.py         # SQLAlchemy ORM: TaskModel, WorkerModel
+├── models.py         # SQLAlchemy ORM: TaskModel
 ├── database.py       # Engine (WAL mode), SessionLocal, init_db()
 ├── schemas.py        # Pydantic request/response models
 └── logging_config.py # Logging setup
